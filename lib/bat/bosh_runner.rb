@@ -1,19 +1,25 @@
 require 'common/exec'
+require 'json'
+require 'base64'
+require 'bat/stemcell'
+require 'bat/release'
+require 'bat/deployment'
 
 module Bat
   class BoshRunner
-    DEFAULT_POLL_INTERVAL = 1
-
-    def initialize(executable, cli_config_path, director_user, director_password, logger)
+    def initialize(executable, logger)
       @executable = executable
-      @cli_config_path = cli_config_path
-      @director_user = director_user
-      @director_password = director_password
       @logger = logger
     end
 
     def bosh(arguments, options = {})
-      command = build_command(arguments, options)
+      command_options = {}
+      command_options[:json] = options.fetch(:json, true)
+
+      if options[:deployment]
+        command_options[:deployment] = options.delete(:deployment)
+      end
+      command = build_command(arguments, command_options)
       begin
         @logger.info("Running bosh command --> #{command}")
         result = Bosh::Exec.sh(command, options)
@@ -38,21 +44,37 @@ module Bat
       bosh(command, options.merge(on_error: :return))
     end
 
+    def deployments
+      result = {}
+      JSON.parse(bosh('deployments').output)["Tables"][0]["Rows"].each { |r| result[r['name']] = true }
+      result
+    end
+
+    def releases
+      result = []
+      JSON.parse(bosh('releases').output)["Tables"][0]["Rows"].each do |r|
+        result << Bat::Release.new(r['name'], [])
+      end
+      result
+    end
+
+    def stemcells
+      result = []
+      JSON.parse(bosh('stemcells').output)["Tables"][0]["Rows"].each do |s|
+        result << Bat::Stemcell.new(s['name'], s['version'])
+      end
+      result
+    end
+
     private
 
     def build_command(arguments, options = {})
-      poll_interval = options[:poll_interval] || DEFAULT_POLL_INTERVAL
       command = []
       command << "#{@executable} --non-interactive"
-      command << "-P #{poll_interval}"
-      command << "--config #{@cli_config_path}"
-      command << "--user #{@director_user} --password #{@director_password}"
+      command << '--json' if options[:json]
+      command << "--deployment #{options[:deployment]}" if options[:deployment]
       command << arguments
-
-      append_deploy_options(command) if deploy_command?(arguments)
-
       command << '2>&1'
-
       command.join(' ')
     end
 

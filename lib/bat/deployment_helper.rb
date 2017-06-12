@@ -33,28 +33,14 @@ module Bat
 
       if !block_given?
         return deployment
-      elsif block.arity == 0
-        expect(@bosh_runner.bosh("deployment #{deployment.to_path}")).to succeed
-        expect(@bosh_runner.bosh('deploy')).to succeed
-        deployed = true
-        yield
       elsif block.arity == 1
         yield deployment
-      elsif block.arity == 2
-        expect(@bosh_runner.bosh("deployment #{deployment.to_path}")).to succeed
-        result = @bosh_runner.bosh('deploy')
-        expect(result).to succeed
-        deployed = true
-        yield deployment, result
       else
         raise "unknown arity: #{block.arity}"
       end
     ensure
       if block_given?
         deployment.delete if deployment
-        if deployed
-          expect(@bosh_runner.bosh("delete deployment #{deployment.name}")).to succeed
-        end
       end
     end
 
@@ -95,10 +81,6 @@ module Bat
 
     def deployment_name
       @spec.fetch('properties', {}).fetch('name', 'bat')
-    end
-
-    def director_ip
-      @env.director
     end
 
     def use_vip
@@ -193,16 +175,20 @@ module Bat
       @spec['properties'].fetch('network', {}).fetch('type', nil)
     end
 
-    def get_task_id(output, state = 'done')
-      task_regex = /Task (\d+) #{state}/
-      expect(output).to match(task_regex)
-      match = output.match(task_regex)
-      match[1]
+    def get_most_recent_task_id
+      output = @bosh_runner.bosh("tasks --recent=1").output
+      JSON.parse(output)["Tables"].first["Rows"].first["id"]
     end
 
-    def events(task_id)
-      result = @bosh_runner.bosh("task #{task_id} --raw")
-      expect(result).to succeed_with /Task \d+ \w+/
+    def events(task_id, expected_task_status = 'done')
+      result = @bosh_runner.bosh_safe("task #{task_id} --event")
+      if expected_task_status == 'error'
+        expect(result).to_not succeed
+      else
+        expect(result).to succeed
+      end
+
+      expect(result.output).to match /Task #{task_id} #{expected_task_status}/
 
       event_list = []
       result.output.split("\n").each do |line|

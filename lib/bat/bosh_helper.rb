@@ -20,8 +20,7 @@ module Bat
 
     def ssh_options
       {
-        private_key: @env.vcap_private_key,
-        password: @env.vcap_password
+        private_key: @env.private_key
       }
     end
 
@@ -37,26 +36,10 @@ module Bat
       @env.bat_infrastructure == 'warden'
     end
 
-    def compiled_package_cache?
-      info = @bosh_api.info
-      info['features'] && info['features']['compiled_package_cache']
-    end
-
-    def dns?
-      info = @bosh_api.info
-      info['features'] && info['features']['dns']['status']
-    end
-
-    def bosh_tld
-      info = @bosh_api.info
-      info['features']['dns']['extras']['domain_name'] if dns?
-    end
-
-    def persistent_disk(job, index)
-      get_disks(job, index).each do |disk|
-        values = disk.last
-        if values[:mountpoint] == '/var/vcap/store'
-          return values[:blocks]
+    def persistent_disk(job, index, options)
+      get_disks(job, index, options).each do |_, disk|
+        if disk[:mountpoint] == '/var/vcap/store'
+          return disk[:blocks]
         end
       end
       raise 'Could not find persistent disk size'
@@ -71,8 +54,8 @@ module Bat
       options[:user_known_hosts_file] = %w[/dev/null]
       options[:keys] = [private_key] unless private_key.nil?
 
-      if options[:keys].nil? && options[:password].nil?
-        raise 'Need to set ssh :password, :keys, or :private_key'
+      if options[:keys].nil?
+        raise 'Need to set ssh :keys, or :private_key'
       end
 
       @logger.info("--> ssh options: #{options.inspect}")
@@ -85,28 +68,13 @@ module Bat
     end
 
     def bosh_ssh(job, index, command, options = {})
-      private_key = ssh_options[:private_key]
+      options[:json] = false
+      column = options.delete(:column)
 
-      # Try our best to clean out old host fingerprints for director and vms
-      if File.exist?(File.expand_path('~/.ssh/known_hosts'))
-        Bosh::Exec.sh("ssh-keygen -R '#{@env.director}'")
-        Bosh::Exec.sh("ssh-keygen -R '#{static_ip}'")
-      end
-
-      if private_key
-        bosh_ssh_options = {
-          gateway_host: @env.director,
-          gateway_user: 'vcap',
-          gateway_identity_file: private_key,
-        }.map { |k, v| "--#{k} '#{v}'" }.join(' ')
-
-        # Note gateway_host + ip: ...fingerprint does not match for "micro.ci2.cf-app.com,54.208.15.101" (Net::SSH::HostKeyMismatch)
-        if File.exist?(File.expand_path('~/.ssh/known_hosts'))
-          Bosh::Exec.sh("ssh-keygen -R '#{@env.director},#{static_ip}'").output
-        end
-      end
-
-      bosh("ssh #{job} #{index} '#{command}' #{bosh_ssh_options}")
+      bosh_ssh_options = ''
+      bosh_ssh_options << '--results' if options.delete(:result)
+      bosh_ssh_options << " --column=#{column}" if column
+      bosh("ssh #{job}/#{index} -c '#{command}' #{bosh_ssh_options}", options)
     end
 
     def tarfile
@@ -124,54 +92,51 @@ module Bat
       list
     end
 
-    def wait_for_vm_state(name, index, state, wait_time_in_seconds=300)
-      puts "Start waiting for vm #{name} to have state #{state}"
-      vm_in_state = nil
+    def wait_for_instance_state(name, index, state, wait_time_in_seconds=300)
+      puts "Start waiting for instance #{name} to have state #{state}"
+      instance_in_state = nil
       10.times do
-        vm = get_vm(name, index)
-        if vm && vm[:state] =~ /#{state}/
-          vm_in_state = vm
+        instance = get_instance(name, index)
+        if instance && instance['process_state'] =~ /#{state}/
+          instance_in_state = instance
           break
         end
         sleep wait_time_in_seconds/10
       end
-      if vm_in_state
-        @logger.info("Finished waiting for vm #{name} have state=#{state} vm=#{vm_in_state.inspect}")
-        vm_in_state
+      if instance_in_state
+        @logger.info("Finished waiting for instance #{name} have state=#{state} instance=#{instance_in_state.inspect}")
+        instance_in_state
       else
-        raise Exception, "VM is still not in expected state: #{state}"
+        raise Exception, "Instance is still not in expected state: #{state}"
       end
     end
 
     private
 
-    def get_vm(name, index)
-      get_vms.find do |v|
-        v[:vm] =~ /#{name}\/[a-f0-9\-]{36} \(#{index}\)/ || v[:vm] =~ /#{name}\/#{index} \([a-f0-9\-]{36}\)/
+    def get_instance(name, index)
+      instance = get_instances.find do |i|
+        i['instance'] =~ /#{name}\/[a-f0-9\-]{36}/ || i['instance'] =~ /#{name}\/#{index} \([a-f0-9\-]{36}\)/ && i['index'] == index
       end
+
+      instance
     end
 
-    def get_vms
-      output = @bosh_runner.bosh('vms --details').output
-      table = output.lines.grep(/\|/)
+    def get_instances
+      output = @bosh_runner.bosh('instances --details').output
+      output_hash = JSON.parse(output)
 
-      table = table.map { |line| line.split('|').map(&:strip).reject(&:empty?) }
-      headers = table.shift || []
-      headers.map! do |header|
-        header.downcase.tr('/ ', '_').to_sym
-      end
-      output = []
-      table.each do |row|
-        output << Hash[headers.zip(row)]
-      end
-      output
+      output_hash["Tables"][0]["Rows"]
     end
 
-    def get_disks(job, index)
+    def get_disks(job, index, options)
       disks = {}
       df_cmd = 'df -x tmpfs -x devtmpfs -x debugfs -l | tail -n +2'
 
-      df_output = bosh_ssh(job, index, df_cmd).output
+      options[:result] = true
+      options[:json] = false
+      options[:column] = 'stdout'
+
+      df_output = bosh_ssh(job, index, df_cmd, options).output
       df_output.split("\n").each do |line|
         fields = line.split(/\s+/)
         disks[fields[0]] = {
