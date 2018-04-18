@@ -37,13 +37,13 @@ networks:
     gateway: <%= network.gateway %>
     dns: <%= p('dns').inspect %>
     cloud_properties:
-      vcn: <%= network.cloud_properties.vcn %>
-      subnet_name: <%= network.cloud_properties.subnet %>
+      vcn_id: <%= network.cloud_properties.vcn_id %>
+      subnet_id: <%= network.cloud_properties.subnet_id %>
   <% else %>
   dns: <%= p('dns').inspect %>
   cloud_properties:
-      vcn: <%= network.cloud_properties.vcn %>
-      subnet_name: <%= network.cloud_properties.subnet %>
+      vcn_id: <%= network.cloud_properties.vcn_id %>
+      subnet_id: <%= network.cloud_properties.subnet_id %>
   <% end %>
 <% end %>
 
